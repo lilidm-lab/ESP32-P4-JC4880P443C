@@ -1,0 +1,40 @@
+[package]
+name = "ESP32-P4-JC4880P443C"
+version = "0.1.0"
+authors = ["lidm0707 <kachon.moo.w@gmail.com>"]
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+
+[lib]
+name = "esp32_p4_jc4880p443c"
+
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true    # Symbols are nice, and they don't increase the size on Flash
+opt-level = "z"
+[patch.crates-io]
+esp-idf-sys = { git = "https://github.com/esp-rs/esp-idf.git" }
+esp-idf-hal = { git = "https://github.com/esp-rs/esp-idf.git" }
+esp-idf-svc = { git = "https://github.com/esp-rs/esp-idf.git" }
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+embedded-graphics = "0.8"
+esp-idf-hal = "0.47"
+esp-idf-svc = { version = "0.53", features = ["critical-section", "embassy-time-driver", "embassy-sync"] }
+# Remove `generic-queue-8` if you plan to use `embassy-time` WITH `embassy-executor`
+embassy-time = { version = "0.5", features = ["generic-queue-8"] }
+
+[build-dependencies]
+embuild = "0.33.5"
+
+[package.metadata.esp-idf-sys]
+extra_components = [
+  { remote_component = { name = "espressif/esp_hosted", version = "^2.11.0" } },
+  { remote_component = { name = "espressif/esp_wifi_remote", version = "^1.6.0" } },
+]
