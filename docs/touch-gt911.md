@@ -1,66 +1,68 @@
 # GT911 Touch — JC4880P443C_I_W (ESP32-P4)
 
-สรุปการดีบัก: 2026-10-16 — **SOLVED** (touch ตรงทั้งจอ, UI ใช้ได้ครบ)
+Debug summary: 2026-10-16 — **SOLVED** (touch is accurate across the entire display, UI fully usable)
 
-## ทำไม touch ถึงไม่ตรง — สาเหตุหลัก
+## Why touch coordinates were wrong — root causes
 
-### 1. อ่าน point register ผิด offset (root cause ของ "touch เพี้ยน")
+### 1. Reading the point register at the wrong offset (root cause of "skewed touch")
 
-โค้ดเดิมอ่านพิกัดจาก register **0x8150** แต่ GT911 เก็บ point data เริ่มที่
-**0x814F** โดย layout ต่อ 1 จุดคือ:
+The original code read coordinates from register **0x8150**, but the GT911 stores
+point data starting at **0x814F**. The layout per point is:
 
 ```
 register:  814F    8150   8151   8152   8153   8154
-ค่า:       track   x_lo   x_hi   y_lo   y_hi   size
+value:     track   x_lo   x_hi   y_lo   y_hi   size
 ```
 
-เราอ่านจาก 0x8150 แล้วถอดรหัสแบบ `[x_hi, x_lo, y_hi, y_lo]` → ทุก byte
-เลื่อนไป 1 ตำแหน่ง:
+We read from 0x8150 and decoded as `[x_hi, x_lo, y_hi, y_lo]` → every byte
+shifted by one position:
 
-| ค่าที่โปรแกรมเห็น | สูตรผิด | ผลที่ตามมา |
+| Value the program saw | Wrong formula | Consequence |
 |---|---|---|
-| "x" | `x_hi*256 + y_lo` | x เดินได้แต่ jump +256 เมื่อ x>255, ปนค่าแกน Y |
-| "y" | `y_hi*256 + size` | **quantize เป็น 4 แถบ `k*256+~40`** เพราะ y_hi∈{0..3} และ size (ความแรงนิ้ว) ติดช่วง 28-43 เสมอ |
+| "x" | `x_hi*256 + y_lo` | x moved but jumped +256 when x>255, contaminated with Y-axis values |
+| "y" | `y_hi*256 + size` | **quantized into 4 bands `k*256+~40`** because y_hi∈{0..3} and size (finger pressure) always fell in the 28-43 range |
 
-อาการ "Y เด้งทีละ 256px" ที่ไล่กันมาทั้งวันคือ `(y_hi<<8)|size` ไม่ใช่พิกัดจริง
+The "Y jumps in 256px steps" symptom we chased all day was `(y_hi<<8)|size`, not a real coordinate.
 
-**Fix** (`src/touch.rs`): อ่านจาก `REG_POINT0 = 0x814F` และ decode
+**Fix** (`src/touch.rs`): read from `REG_POINT0 = 0x814F` and decode
 `x = buf[2]<<8 | buf[1]`, `y = buf[4]<<8 | buf[3]`
-(เทียบเท่ากับ `esp_lcd_touch_gt911.c` ของ Espressif)
+(equivalent to Espressif's `esp_lcd_touch_gt911.c`)
 
-### 2. ปุ่ม UI กดไม่ติด (bug ตัวที่สอง — พบหลังจาก touch ตรงแล้ว)
+### 2. UI buttons not registering (second bug — found after touch was accurate)
 
-`wait_touch` เดิมใช้ debounce "อ่านได้ 2 ครั้งติดกัน" แต่ `Touch::read()`
-**เคลียร์ status register (0x814E) ทุกครั้ง** → การอ่านครั้งที่สองทันทีจะได้
-`None` เพราะ chip ยังไม่ส่ง frame ใหม่ → loop ไม่มีวัน return → กดปุ่มไม่มีผล
+The original `wait_touch` used debouncing of "read successfully twice in a
+row", but `Touch::read()` **clears the status register (0x814E) every time** →
+an immediate second read returns `None` because the chip hasn't sent a new
+frame yet → the loop could never return → button presses had no effect.
 
-**Fix** (`src/ui.rs`): ถอด debounce — รอปล่อยนิ้ว แล้ว return จุดแรกที่อ่านได้
+**Fix** (`src/ui.rs`): removed the debounce — wait for finger release, then
+return the first point read.
 
-## สิ่งที่แก้ระหว่างทาง (จำเป็นแต่ไม่ใช่ root cause)
+## Fixes made along the way (necessary but not the root cause)
 
-- **RST pin: GPIO22 → GPIO3** — ตาม BSP ที่ verified บนบอร์ดนี้
-  (`ultramcu/guition-jc4880p4-bsp`) เดิมเราไม่เคย reset GT911 จริงเลย
-- Pin map สุดท้าย: SDA=7, SCL=8, RST=3, INT=21 (ใช้ latch address 0x5D ตอน reset)
+- **RST pin: GPIO22 → GPIO3** — per the BSP verified on this board
+  (`ultramcu/guition-jc4880p4-bsp`); previously we never actually reset the GT911
+- Final pin map: SDA=7, SCL=8, RST=3, INT=21 (latch address 0x5D during reset)
 
-## วิธีหา root cause (บทเรียน)
+## How the root cause was found (lessons)
 
-1. hex dump ค่า byte ดิบทุกเฟรม → เห็น pattern `y = k*256 + 40` (2-bit Y)
-2. ตัด software ออกด้วยการอัปโหลด firmware ทดสอบของคนอื่น
-   (`ultramcu/guition-jc4880p4-bsp` → `DisplayTouchTest`) — touch ลื่นเต็มจอ
-   = ฮาร์ดแวร์ปกติ แน่นอนว่าโค้ดเราผิด
-3. diff วิธีอ่าน register กับโค้ดที่ทำงานจริง → เจอ offset 0x814F
-4. ยืนยันด้วยข้อมูลเราเอง: bytes `00 27 02 23` → decode ผิดได้ (39,547)
-   decode ถูกคือ y=0x227=551
+1. Hex dump of raw bytes every frame → spotted the pattern `y = k*256 + 40` (2-bit Y)
+2. Ruled out the software by uploading someone else's test firmware
+   (`ultramcu/guition-jc4880p4-bsp` → `DisplayTouchTest`) — touch was smooth
+   across the whole display = hardware is fine, so our code was definitely wrong
+3. Diffed the register-reading method against the known-working code → found the 0x814F offset
+4. Confirmed with our own data: bytes `00 27 02 23` → wrong decode gives (39,547);
+   correct decode is y=0x227=551
 
-## เครื่องมือที่เหลืออยู่ในโปรเจกต์
+## Tools remaining in the project
 
-- `ui::paint_test` — วาดจุดตาม touch แบบ real-time บน grid 100px (EXIT = มุมขวาบน)
-- `touch.dump_config()` — hex dump config 186 bytes ตอน boot
-- log `touch raw` ทุกเฟรม (ควรตัดก่อนปล่อยรุ่น)
+- `ui::paint_test` — draws points following touch in real time on a 100px grid (EXIT = top-right corner)
+- `touch.dump_config()` — hex dump of the 186-byte config at boot
+- `touch raw` log every frame (should be removed before release)
 
-## ข้อห้าม / ข้อควรจำ
+## Rules / things to remember
 
-- อย่าอ่าน point จาก 0x8150 — track id อยู่ที่ 0x814F เสมอ
-- อย่าอ่านสถานะซ้ำโดยไม่รอ chip update (เรา clear 0x814E หลังอ่านทุกครั้ง)
-- byte order ของพิกัด: high byte อยู่ที่ address ถัดจาก low byte
-  (per-axis little-endian ใน register, ไม่ใช่ from_be ข้าม byte ที่ผิดตำแหน่ง)
+- Never read points from 0x8150 — the track id is always at 0x814F
+- Never re-read status without waiting for the chip to update (we clear 0x814E after every read)
+- Coordinate byte order: the high byte sits at the address after the low byte
+  (per-axis little-endian in registers, not a misplaced cross-byte from_be)
